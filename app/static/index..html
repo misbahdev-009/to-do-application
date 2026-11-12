@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tasks</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#eef2f7; --surface:#fff; --ink:#14213d; --muted:#6b7a90; --line:#dbe3ee;
+  --accent:#2457f5; --accent-ink:#fff; --done:#1f9d6b; --danger:#d23b4a;
+}
+@media (prefers-color-scheme:dark){
+  :root{--bg:#0e1524; --surface:#16203a; --ink:#e8eefb; --muted:#8fa0ba; --line:#26335a;
+    --accent:#6f93ff; --accent-ink:#0e1524; --done:#43c996; --danger:#ff7a86}
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 Figtree,system-ui,sans-serif}
+main{max-width:720px;margin:0 auto;padding:48px 20px 80px}
+h1{font-size:2.4rem;letter-spacing:-.02em;margin:0 0 4px}
+.sub{color:var(--muted);margin:0 0 28px}
+form.add{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px;display:grid;gap:10px}
+input,textarea,select{font:inherit;color:inherit;background:var(--bg);border:1px solid var(--line);border-radius:9px;padding:10px 12px;width:100%}
+input:focus,textarea:focus,select:focus,button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+textarea{resize:vertical;min-height:44px}
+.row{display:flex;gap:10px;align-items:center}
+button{font:inherit;cursor:pointer;border:0;border-radius:9px;padding:10px 16px;font-weight:600}
+.primary{background:var(--accent);color:var(--accent-ink)}
+.ghost{background:transparent;color:var(--muted);padding:6px 10px}
+.ghost:hover{color:var(--ink)}
+.ghost.del:hover{color:var(--danger)}
+.tabs{display:flex;gap:6px;margin:28px 0 12px}
+.tab{background:transparent;color:var(--muted);padding:7px 14px;border-radius:99px}
+.tab[aria-pressed=true]{background:var(--ink);color:var(--bg)}
+ul{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+li{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px 16px;display:flex;gap:14px;align-items:flex-start}
+.check{flex:none;width:26px;height:26px;border-radius:50%;border:2px solid var(--line);background:transparent;padding:0;margin-top:2px;color:transparent;font-size:15px;line-height:1}
+.check:hover{border-color:var(--done)}
+li.done .check{background:var(--done);border-color:var(--done);color:#fff}
+.body{flex:1;min-width:0}
+.title{font-weight:600;overflow-wrap:anywhere}
+li.done .title{text-decoration:line-through;color:var(--muted)}
+.desc{color:var(--muted);margin-top:2px;overflow-wrap:anywhere}
+.meta{color:var(--muted);font-size:.8rem;margin-top:6px}
+.actions{display:flex;gap:2px;flex:none}
+.edit-fields{display:grid;gap:8px}
+.empty{text-align:center;color:var(--muted);padding:40px 10px;border:1px dashed var(--line);border-radius:14px}
+#toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:12px 18px;border-radius:10px;max-width:90vw;opacity:0;pointer-events:none;transition:opacity .2s}
+#toast.show{opacity:1}
+#toast.err{background:var(--danger);color:#fff}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+@media (max-width:480px){li{flex-wrap:wrap}.actions{width:100%;justify-content:flex-end}}
+</style>
+</head>
+<body>
+<main>
+  <h1>Tasks</h1>
+  <p class="sub" id="summary">Loading…</p>
+
+  <form class="add" id="addForm">
+    <input id="newTitle" placeholder="What needs doing?" maxlength="200" required aria-label="Task title">
+    <textarea id="newDesc" placeholder="Details (optional)" maxlength="1000" rows="1" aria-label="Description"></textarea>
+    <div class="row"><button class="primary" type="submit">Add task</button></div>
+  </form>
+
+  <div class="tabs" role="group" aria-label="Filter tasks">
+    <button class="tab" data-f="" aria-pressed="true">All</button>
+    <button class="tab" data-f="pending" aria-pressed="false">Pending</button>
+    <button class="tab" data-f="completed" aria-pressed="false">Completed</button>
+  </div>
+
+  <ul id="list"></ul>
+</main>
+<div id="toast" role="status"></div>
+
+<script>
+const API = "/api/todos";
+let filter = "", editingId = null;
+const $ = (id) => document.getElementById(id);
+
+function toast(msg, isErr) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.className = "show" + (isErr ? " err" : "");
+  clearTimeout(toast.t);
+  toast.t = setTimeout(() => (t.className = ""), 3000);
+}
+
+async function api(path = "", opts = {}) {
+  let res;
+  try {
+    res = await fetch(API + path, { headers: { "Content-Type": "application/json" }, ...opts });
+  } catch {
+    throw new Error("Can't reach the server. Is it running?");
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const e = data.error || {};
+    const detail = e.details && e.details[0] ? e.details[0].message : "";
+    throw new Error(detail || e.message || "Something went wrong.");
+  }
+  return data;
+}
+
+function fmt(iso) {
+  return new Date(iso).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+}
+
+async function load() {
+  try {
+    const q = filter ? "?status=" + filter : "";
+    const todos = await api(q);
+    render(todos);
+  } catch (e) {
+    $("summary").textContent = "Couldn't load tasks.";
+    toast(e.message, true);
+  }
+}
+
+function render(todos) {
+  const list = $("list");
+  list.innerHTML = "";
+  const done = todos.filter((t) => t.status === "completed").length;
+  $("summary").textContent = todos.length
+    ? `${todos.length - done} to do, ${done} done`
+    : "Nothing here yet.";
+
+  if (!todos.length) {
+    const d = document.createElement("div");
+    d.className = "empty";
+    d.textContent = filter ? `No ${filter} tasks.` : "Add your first task above.";
+    list.appendChild(d);
+    return;
+  }
+  todos.forEach((t) => list.appendChild(t.id === editingId ? editRow(t) : viewRow(t)));
+}
+
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+}
+
+function viewRow(t) {
+  const li = el("li", t.status === "completed" ? "done" : "");
+  const chk = el("button", "check", "✓");
+  chk.setAttribute("aria-label", t.status === "completed" ? "Mark as pending" : "Mark as completed");
+  chk.onclick = () => save(t, { status: t.status === "completed" ? "pending" : "completed" });
+
+  const body = el("div", "body");
+  body.appendChild(el("div", "title", t.title));
+  if (t.description) body.appendChild(el("div", "desc", t.description));
+  body.appendChild(el("div", "meta", "Added " + fmt(t.created_at)));
+
+  const act = el("div", "actions");
+  const ed = el("button", "ghost", "Edit");
+  ed.onclick = () => { editingId = t.id; load(); };
+  const del = el("button", "ghost del", "Delete");
+  del.onclick = () => remove(t);
+  act.append(ed, del);
+
+  li.append(chk, body, act);
+  return li;
+}
+
+function editRow(t) {
+  const li = el("li");
+  const box = el("div", "body edit-fields");
+  const title = el("input"); title.value = t.title; title.maxLength = 200; title.setAttribute("aria-label", "Title");
+  const desc = el("textarea"); desc.value = t.description || ""; desc.maxLength = 1000; desc.setAttribute("aria-label", "Description");
+  const sel = el("select");
+  ["pending", "completed"].forEach((s) => {
+    const o = el("option", "", s[0].toUpperCase() + s.slice(1));
+    o.value = s; o.selected = s === t.status; sel.appendChild(o);
+  });
+  const row = el("div", "row");
+  const saveBtn = el("button", "primary", "Save changes");
+  const cancel = el("button", "ghost", "Cancel");
+  saveBtn.onclick = () => save(t, { title: title.value, description: desc.value || null, status: sel.value });
+  cancel.onclick = () => { editingId = null; load(); };
+  row.append(saveBtn, cancel);
+  box.append(title, desc, sel, row);
+  li.appendChild(box);
+  setTimeout(() => title.focus(), 0);
+  return li;
+}
+
+async function save(t, changes) {
+  const payload = { title: t.title, description: t.description, status: t.status, ...changes };
+  try {
+    await api("/" + t.id, { method: "PUT", body: JSON.stringify(payload) });
+    editingId = null;
+    toast("Task updated");
+    load();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function remove(t) {
+  if (!confirm(`Delete "${t.title}"?`)) return;
+  try {
+    await api("/" + t.id, { method: "DELETE" });
+    toast("Task deleted");
+    load();
+  } catch (e) { toast(e.message, true); }
+}
+
+$("addForm").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const title = $("newTitle").value.trim();
+  if (!title) return toast("Enter a title for the task.", true);
+  try {
+    await api("", { method: "POST", body: JSON.stringify({ title, description: $("newDesc").value.trim() || null }) });
+    ev.target.reset();
+    $("newTitle").focus();
+    toast("Task added");
+    load();
+  } catch (e) { toast(e.message, true); }
+});
+
+document.querySelectorAll(".tab").forEach((b) =>
+  b.addEventListener("click", () => {
+    filter = b.dataset.f;
+    document.querySelectorAll(".tab").forEach((x) => x.setAttribute("aria-pressed", x === b));
+    load();
+  })
+);
+
+load();
+</script>
+</body>
+</html>
